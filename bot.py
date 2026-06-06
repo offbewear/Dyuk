@@ -16,7 +16,17 @@ from telegram.ext import (
 # ВАЖНО: старый токен «засветился», обязательно создай новый в @BotFather
 # и положи его в переменную окружения BOT_TOKEN (export BOT_TOKEN="...").
 TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_НОВЫЙ_ТОКЕН")
-ADMIN_ID = 1880492159
+
+# ADMIN_GROUP_ID — ID рабочей группы персонала (отрицательное число вида -1002...).
+# Узнаётся командой /id, отправленной в самой группе. Задаётся переменной окружения.
+ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
+# ADMIN_ID — личный «супер-админ» (резерв, пока не настроена группа).
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1880492159"))
+
+
+def admin_target():
+    """Куда слать новые заказы: в группу персонала, иначе — личке супер-админу."""
+    return ADMIN_GROUP_ID if ADMIN_GROUP_ID else ADMIN_ID
 
 TZ = "+5 hours"                 # часовой пояс Узбекистана для datetime() в SQL
 CUPS_FOR_FREE = 7               # сколько чашек до бесплатной
@@ -668,14 +678,19 @@ async def confirm_order(query, context, lang, uid):
     )
     conn.commit()
 
-    # уведомление админу
+    # уведомление в группу персонала (или супер-админу) — сразу с кнопками
     disc = f"  ({T(lang, 'first_discount')})" if is_first else ""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Готов", callback_data=f"done_{order_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_id}"),
+    ]])
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_ID,
+            chat_id=admin_target(),
             text=(f"🆕 Новый заказ #{order_id}\n\n"
                   f"☕ {drink} {size}\n🥛 {milk}\n🍬 {sweet}\n🍮 {syrup}\n"
                   f"💰 {fmt(final_price)} сум{disc}"),
+            reply_markup=kb,
         )
     except Exception as e:
         print("ADMIN NOTIFY ERROR:", e)
@@ -719,10 +734,25 @@ async def my_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_qr(update.message, update.effective_user.id)
 
 
+async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает ID текущего чата. В группе персонала — это и есть ADMIN_GROUP_ID."""
+    chat = update.effective_chat
+    await update.message.reply_text(
+        f"🆔 chat_id: `{chat.id}`\nтип: {chat.type}\n\n"
+        "Если это рабочая группа — впиши это число в переменную ADMIN_GROUP_ID на Railway.",
+        parse_mode="Markdown",
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # АДМИН
 # ─────────────────────────────────────────────────────────────
 def is_admin(update):
+    # Разрешаем, если команда отправлена В рабочей группе персонала,
+    # либо лично супер-админом.
+    chat = update.effective_chat
+    if ADMIN_GROUP_ID and chat and chat.id == ADMIN_GROUP_ID:
+        return True
     return update.effective_user.id == ADMIN_ID
 
 
@@ -801,7 +831,10 @@ async def orders_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def order_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.from_user.id != ADMIN_ID:
+    # Жать кнопки можно в группе персонала или супер-админу лично
+    chat = query.message.chat if query.message else None
+    in_group = ADMIN_GROUP_ID and chat and chat.id == ADMIN_GROUP_ID
+    if not (in_group or query.from_user.id == ADMIN_ID):
         return
     if query.data.startswith("done_"):
         order_id = int(query.data.replace("done_", ""))
@@ -920,6 +953,7 @@ def main():
 
     # команды
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("id", chat_id_cmd))
     app.add_handler(CommandHandler("myqr", my_qr))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("orders", orders_cmd))
